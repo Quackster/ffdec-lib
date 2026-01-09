@@ -234,9 +234,12 @@ jobs:
           PY
 
       - name: Create Pull Request
+        id: cpr
         if: steps.exists.outputs.exists != 'true'
         uses: peter-evans/create-pull-request@v6
         with:
+          # If you need approvals to count as "not the PR author", set a PAT secret and use it here too:
+          # token: ${{ secrets.FFDEC_SYNC_PAT }}
           commit-message: "Add ffdec-lib ${{ steps.upstream.outputs.version }}"
           title: "Add ffdec-lib ${{ steps.upstream.outputs.version }}"
           body: |
@@ -249,3 +252,24 @@ jobs:
             and maven-metadata.xml was updated.
           branch: "automation/sync-ffdec-lib-${{ steps.upstream.outputs.version }}"
           delete-branch: true
+
+      # Auto-approve the PR
+      - name: Approve Pull Request
+        if: steps.exists.outputs.exists != 'true' && steps.cpr.outputs.pull-request-number != ''
+        uses: peter-evans/approve-pull-request@v5
+        with:
+          pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
+          # Recommended if branch protections require a "real" reviewer:
+          # github-token: ${{ secrets.FFDEC_SYNC_PAT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Enable auto-merge (merges when required checks pass)
+      - name: Enable Pull Request Auto-merge
+        if: steps.exists.outputs.exists != 'true' && steps.cpr.outputs.pull-request-number != ''
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
+          merge-method: squash
+          # Recommended if needed:
+          # token: ${{ secrets.FFDEC_SYNC_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
