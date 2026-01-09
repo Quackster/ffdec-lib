@@ -256,7 +256,7 @@ jobs:
       # Auto-approve the PR
       - name: Approve Pull Request
         if: steps.exists.outputs.exists != 'true' && steps.cpr.outputs.pull-request-number != ''
-        uses: peter-evans/approve-pull-request@v5
+        uses: juliangruber/approve-pull-request-action@v2
         with:
           pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
           # Recommended if branch protections require a "real" reviewer:
