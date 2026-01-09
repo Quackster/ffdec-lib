@@ -1,29 +1,6 @@
-name: Backfill ffdec-lib from upstream releases (run once)
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install jq (just in case)
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-
       - name: Backfill all stable upstream releases
         env:
           UPSTREAM: jindrapetrik/jpexs-decompiler
-          # Use the workflow token for API access + higher rate limits than anonymous
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -55,7 +32,7 @@ jobs:
           # Combine into one array
           releases_json="$(jq -s 'add' "$all_releases")"
 
-          # Filter stable releases, oldest -> newest so metadata sorting stays intuitive
+          # Filter stable releases, oldest -> newest
           stable="$(echo "$releases_json" | jq '
             map(select(.draft == false and .prerelease == false))
             | sort_by(.published_at)
@@ -74,13 +51,25 @@ jobs:
           failed=0
 
           work="$(mktemp -d)"
-          mkdir -p "$work"
+          trap 'rm -rf "$work" "$all_releases"' EXIT
 
           # --- Iterate each stable release ---
-          # Output TSV rows: tag \t version \t asset_url
-          while IFS=$'\t' read -r tag version asset_url; do
-            if [[ -z "$tag" || -z "$version" || -z "$asset_url" ]]; then
-              echo "Skipping malformed row: tag='${tag}' version='${version}' asset='${asset_url}'" >&2
+          # We choose the first asset that looks like ffdec lib zip.
+          # Adjust the regex if upstream uses a different name.
+          echo "$stable" | jq -r '
+            .[]
+            | .tag_name as $tag
+            | ($tag | sub("^v"; "")) as $version
+            | (
+                .assets
+                | map(select(.browser_download_url | test("(?i)ffdec.*lib.*\\.zip$|ffdec-lib.*\\.zip$|ffdec.*\\.zip$")))
+                | .[0].browser_download_url
+              ) as $asset_url
+            | [$tag, $version, ($asset_url // "")]
+            | @tsv
+          ' | while IFS=$'\t' read -r tag version asset_url; do
+            if [[ -z "${tag}" || -z "${version}" || -z "${asset_url}" ]]; then
+              echo "Skipping row (missing asset?): tag='${tag}' version='${version}' asset='${asset_url}'" >&2
               failed=$((failed+1))
               continue
             fi
@@ -95,9 +84,38 @@ jobs:
             echo "ADD  ${version} from ${tag}"
             mkdir -p "$target_dir"
 
-            # Download asset
             zip_path="${work}/ffdec_lib_${version}.zip"
             echo "  Downloading ${asset_url}"
-            if ! curl -fL -H "Authorization: Bearer ${GH_TOKEN}" -o "$zip_path" "$asset_url"; then
+            if ! curl -fL \
+              -H "Accept: application/octet-stream" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -o "$zip_path" \
+              "$asset_url"; then
               echo "  ERROR downloading ${asset_url}" >&2
               rm -rf "$target_dir"
+              failed=$((failed+1))
+              continue
+            fi
+
+            echo "  Extracting..."
+            if ! unzip -q "$zip_path" -d "$target_dir"; then
+              echo "  ERROR extracting ${zip_path}" >&2
+              rm -rf "$target_dir"
+              failed=$((failed+1))
+              continue
+            fi
+
+            rm -f "$zip_path"
+            added=$((added+1))
+          done
+
+          echo "Done. added=${added} skipped=${skipped} failed=${failed}"
+
+          if [[ "$added" -gt 0 ]]; then
+            git status --porcelain
+            git add "$root_dir"
+            git commit -m "Backfill ffdec-lib from upstream releases"
+            git push
+          else
+            echo "Nothing new to commit."
+          fi
