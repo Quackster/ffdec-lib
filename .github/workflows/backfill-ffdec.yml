@@ -1,0 +1,103 @@
+name: Backfill ffdec-lib from upstream releases (run once)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq (just in case)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Backfill all stable upstream releases
+        env:
+          UPSTREAM: jindrapetrik/jpexs-decompiler
+          # Use the workflow token for API access + higher rate limits than anonymous
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          root_dir="${GITHUB_WORKSPACE}/lib/com/jpexs/ffdec-lib"
+          mkdir -p "$root_dir"
+
+          # --- Fetch ALL releases via pagination ---
+          all_releases="$(mktemp)"
+          : > "$all_releases"
+
+          page=1
+          while :; do
+            echo "Fetching releases page ${page}..."
+            page_json="$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${UPSTREAM}/releases?per_page=100&page=${page}")"
+
+            count="$(echo "$page_json" | jq 'length')"
+            if [[ "$count" -eq 0 ]]; then
+              break
+            fi
+
+            echo "$page_json" >> "$all_releases"
+            page=$((page+1))
+          done
+
+          # Combine into one array
+          releases_json="$(jq -s 'add' "$all_releases")"
+
+          # Filter stable releases, oldest -> newest so metadata sorting stays intuitive
+          stable="$(echo "$releases_json" | jq '
+            map(select(.draft == false and .prerelease == false))
+            | sort_by(.published_at)
+          ')"
+
+          stable_count="$(echo "$stable" | jq 'length')"
+          if [[ "$stable_count" -eq 0 ]]; then
+            echo "No stable releases found for ${UPSTREAM}."
+            exit 0
+          fi
+
+          echo "Found ${stable_count} stable releases."
+
+          added=0
+          skipped=0
+          failed=0
+
+          work="$(mktemp -d)"
+          mkdir -p "$work"
+
+          # --- Iterate each stable release ---
+          # Output TSV rows: tag \t version \t asset_url
+          while IFS=$'\t' read -r tag version asset_url; do
+            if [[ -z "$tag" || -z "$version" || -z "$asset_url" ]]; then
+              echo "Skipping malformed row: tag='${tag}' version='${version}' asset='${asset_url}'" >&2
+              failed=$((failed+1))
+              continue
+            fi
+
+            target_dir="${root_dir}/${version}"
+            if [[ -d "$target_dir" ]]; then
+              echo "SKIP ${version} (already exists)"
+              skipped=$((skipped+1))
+              continue
+            fi
+
+            echo "ADD  ${version} from ${tag}"
+            mkdir -p "$target_dir"
+
+            # Download asset
+            zip_path="${work}/ffdec_lib_${version}.zip"
+            echo "  Downloading ${asset_url}"
+            if ! curl -fL -H "Authorization: Bearer ${GH_TOKEN}" -o "$zip_path" "$asset_url"; then
+              echo "  ERROR downloading ${asset_url}" >&2
+              rm -rf "$target_dir"
