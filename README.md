@@ -17,8 +17,8 @@ Add the repository:
 ```xml
 <repositories>
   <repository>
-    <id>ffdec-github</id>
-    <url>https://raw.githubusercontent.com/Quackster/ffdec-lib/master/lib</url>
+      <id>ffdec</id>
+      <url>https://github.com/Quackster/ffdec-lib/raw/master/lib</url>
   </repository>
 </repositories>
 ```
