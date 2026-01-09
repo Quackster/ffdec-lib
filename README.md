@@ -2,6 +2,10 @@
 
 This repository is structured as a **static Maven repository** and can be used directly in Maven or Gradle builds.
 
+It allows [JPEXS](https://github.com/jindrapetrik/jpexs-decompiler) to be used as a library for projects.
+
+All files are from: https://github.com/jindrapetrik/jpexs-decompiler/releases
+
 ## Maven Coordinates
 
 - **groupId:** `com.jpexs`
