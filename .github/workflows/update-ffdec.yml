@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   sync:
@@ -233,43 +232,15 @@ jobs:
           tree.write(meta_path, encoding="utf-8", xml_declaration=True)
           PY
 
-      - name: Create Pull Request
-        id: cpr
+      - name: Commit and push changes
         if: steps.exists.outputs.exists != 'true'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          # If you need approvals to count as "not the PR author", set a PAT secret and use it here too:
-          # token: ${{ secrets.FFDEC_SYNC_PAT }}
-          commit-message: "Add ffdec-lib ${{ steps.upstream.outputs.version }}"
-          title: "Add ffdec-lib ${{ steps.upstream.outputs.version }}"
-          body: |
-            This PR adds com.jpexs:ffdec-lib:${{ steps.upstream.outputs.version }} from upstream releases.
-            - Source: ${{ steps.upstream.outputs.tag }} (jindrapetrik/jpexs-decompiler)
-            - Asset:  ${{ steps.upstream.outputs.asset_url }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add lib/
+          git commit -m "Add ffdec-lib ${{ steps.upstream.outputs.version }}
 
-            Files were placed under:
-            lib/com/jpexs/ffdec-lib/${{ steps.upstream.outputs.version }}/
-            and maven-metadata.xml was updated.
-          branch: "automation/sync-ffdec-lib-${{ steps.upstream.outputs.version }}"
-          delete-branch: true
-
-      # Auto-approve the PR
-      - name: Approve Pull Request
-        if: steps.exists.outputs.exists != 'true' && steps.cpr.outputs.pull-request-number != ''
-        uses: juliangruber/approve-pull-request-action@v2
-        with:
-          pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
-          # Recommended if branch protections require a "real" reviewer:
-          # github-token: ${{ secrets.FFDEC_SYNC_PAT }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # Enable auto-merge (merges when required checks pass)
-      - name: Enable Pull Request Auto-merge
-        if: steps.exists.outputs.exists != 'true' && steps.cpr.outputs.pull-request-number != ''
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
-          pull-request-number: ${{ steps.cpr.outputs.pull-request-number }}
-          merge-method: squash
-          # Recommended if needed:
-          # token: ${{ secrets.FFDEC_SYNC_PAT }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          Synced from upstream release ${{ steps.upstream.outputs.tag }}
+          Source: jindrapetrik/jpexs-decompiler
+          Asset: ${{ steps.upstream.outputs.asset_url }}"
+          git push
