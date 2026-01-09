@@ -1,0 +1,246 @@
+name: Sync ffdec-lib from upstream releases
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily at 03:20 UTC
+    - cron: "20 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve latest stable upstream release + asset URL
+        id: upstream
+        env:
+          UPSTREAM: jindrapetrik/jpexs-decompiler
+        run: |
+          set -euo pipefail
+
+          # Fetch releases and pick the latest non-draft, non-prerelease
+          releases_json="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases?per_page=20")"
+
+          tag="$(echo "$releases_json" | jq -r '
+            map(select(.draft == false and .prerelease == false)) | .[0].tag_name
+          ')"
+
+          if [[ -z "$tag" || "$tag" == "null" ]]; then
+            echo "Could not determine latest stable release tag." >&2
+            exit 1
+          fi
+
+          # Tag format in this repo is typically "version24.1.1"
+          version="${tag#version}"
+
+          # Find the "Library only" zip asset; exclude javadoc zip
+          asset_url="$(echo "$releases_json" | jq -r --arg tag "$tag" '
+            map(select(.tag_name == $tag)) | .[0].assets
+            | map(select(.name | test("^ffdec_lib_") and (test("javadoc")|not) and test("\\.zip$")))
+            | .[0].browser_download_url
+          ')"
+
+          if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
+            echo "Could not find ffdec_lib_*.zip asset for tag ${tag}" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset_url=$asset_url" >> "$GITHUB_OUTPUT"
+
+          echo "Upstream tag: $tag"
+          echo "Version:      $version"
+          echo "Asset:        $asset_url"
+
+      - name: Check if version already exists
+        id: exists
+        run: |
+          set -euo pipefail
+          version="${{ steps.upstream.outputs.version }}"
+          target_dir="lib/com/jpexs/ffdec-lib/${version}"
+
+          if [[ -d "$target_dir" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version ${version} already present at ${target_dir}. Nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download + extract library jar, generate Maven structure
+        if: steps.exists.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+          ASSET_URL: ${{ steps.upstream.outputs.asset_url }}
+        run: |
+          set -euo pipefail
+
+          work="$(mktemp -d)"
+          mkdir -p "$work"
+          cd "$work"
+
+          echo "Downloading: $ASSET_URL"
+          curl -fL -o ffdec_lib.zip "$ASSET_URL"
+
+          mkdir extracted
+          unzip -q ffdec_lib.zip -d extracted
+
+          # Try to locate the best jar:
+          # 1) ffdec_lib*.jar
+          # 2) any *.jar (pick largest)
+          jar_path="$(find extracted -type f -iname "ffdec_lib*.jar" | head -n 1 || true)"
+          if [[ -z "$jar_path" ]]; then
+            jar_path="$(find extracted -type f -iname "*.jar" -printf "%s\t%p\n" \
+              | sort -nr | head -n 1 | cut -f2- || true)"
+          fi
+
+          if [[ -z "$jar_path" || ! -f "$jar_path" ]]; then
+            echo "Could not find a jar inside ffdec_lib.zip" >&2
+            echo "Contents:" >&2
+            find extracted -maxdepth 3 -type f >&2 || true
+            exit 1
+          fi
+
+          echo "Using jar: $jar_path"
+
+          # Target Maven-ish layout (like SwfMapLoader's lib/ tree)
+          base_dir="${GITHUB_WORKSPACE}/lib/com/jpexs/ffdec-lib/${VERSION}"
+          mkdir -p "$base_dir"
+
+          jar_out="${base_dir}/ffdec-lib-${VERSION}.jar"
+          cp "$jar_path" "$jar_out"
+
+          # Minimal POM for com.jpexs:ffdec-lib:<version>
+          pom_out="${base_dir}/ffdec-lib-${VERSION}.pom"
+          cat > "$pom_out" <<EOF
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+
+            <groupId>com.jpexs</groupId>
+            <artifactId>ffdec-lib</artifactId>
+            <version>${VERSION}</version>
+            <packaging>jar</packaging>
+
+            <name>FFDec Library</name>
+            <description>FFDec (JPEXS Free Flash Decompiler) library jar redistributed for Maven-style consumption.</description>
+            <licenses>
+              <license>
+                <name>GNU Lesser General Public License, Version 3.0</name>
+                <url>https://www.gnu.org/licenses/lgpl-3.0.html</url>
+                <distribution>repo</distribution>
+              </license>
+            </licenses>
+
+            <scm>
+              <url>https://github.com/jindrapetrik/jpexs-decompiler</url>
+            </scm>
+          </project>
+          EOF
+
+          # Checksums (common in Maven repos)
+          (cd "$base_dir" && \
+            md5sum "ffdec-lib-${VERSION}.jar" > "ffdec-lib-${VERSION}.jar.md5" && \
+            sha1sum "ffdec-lib-${VERSION}.jar" > "ffdec-lib-${VERSION}.jar.sha1" && \
+            md5sum "ffdec-lib-${VERSION}.pom" > "ffdec-lib-${VERSION}.pom.md5" && \
+            sha1sum "ffdec-lib-${VERSION}.pom" > "ffdec-lib-${VERSION}.pom.sha1")
+
+          # Update/create maven-metadata.xml at artifact root
+          python3 - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          version = os.environ["VERSION"]
+          root_dir = os.path.join(os.environ["GITHUB_WORKSPACE"], "lib", "com", "jpexs", "ffdec-lib")
+          os.makedirs(root_dir, exist_ok=True)
+          meta_path = os.path.join(root_dir, "maven-metadata.xml")
+
+          def indent(elem, level=0):
+              i = "\n" + level*"  "
+              if len(elem):
+                  if not elem.text or not elem.text.strip():
+                      elem.text = i + "  "
+                  for e in elem:
+                      indent(e, level+1)
+                  if not e.tail or not e.tail.strip():
+                      e.tail = i
+              else:
+                  if level and (not elem.tail or not elem.tail.strip()):
+                      elem.tail = i
+
+          if os.path.exists(meta_path):
+              tree = ET.parse(meta_path)
+              md = tree.getroot()
+          else:
+              md = ET.Element("metadata")
+              ET.SubElement(md, "groupId").text = "com.jpexs"
+              ET.SubElement(md, "artifactId").text = "ffdec-lib"
+              ET.SubElement(md, "versioning")
+              tree = ET.ElementTree(md)
+
+          versioning = md.find("versioning")
+          if versioning is None:
+              versioning = ET.SubElement(md, "versioning")
+
+          versions = versioning.find("versions")
+          if versions is None:
+              versions = ET.SubElement(versioning, "versions")
+
+          existing = [v.text for v in versions.findall("version") if v.text]
+          if version not in existing:
+              ET.SubElement(versions, "version").text = version
+
+          # Sort versions as dotted numbers where possible
+          def key(v):
+              try:
+                  return tuple(int(x) for x in v.split("."))
+              except Exception:
+                  return (10**9, v)
+
+          all_versions = sorted({v.text for v in versions.findall("version") if v.text}, key=key)
+          # rewrite versions list
+          for v in list(versions.findall("version")):
+              versions.remove(v)
+          for v in all_versions:
+              ET.SubElement(versions, "version").text = v
+
+          latest = versioning.find("latest")
+          if latest is None:
+              latest = ET.SubElement(versioning, "latest")
+          release = versioning.find("release")
+          if release is None:
+              release = ET.SubElement(versioning, "release")
+
+          latest.text = all_versions[-1] if all_versions else version
+          release.text = all_versions[-1] if all_versions else version
+
+          last_updated = versioning.find("lastUpdated")
+          if last_updated is None:
+              last_updated = ET.SubElement(versioning, "lastUpdated")
+          last_updated.text = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+          indent(md)
+          tree.write(meta_path, encoding="utf-8", xml_declaration=True)
+          PY
+
+      - name: Commit and push changes
+        if: steps.exists.outputs.exists != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add lib/
+          git commit -m "Add ffdec-lib ${{ steps.upstream.outputs.version }}
+
+          Synced from upstream release ${{ steps.upstream.outputs.tag }}
+          Source: jindrapetrik/jpexs-decompiler
+          Asset: ${{ steps.upstream.outputs.asset_url }}"
+          git push
