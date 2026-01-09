@@ -1,0 +1,24 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.jpexs</groupId>
+  <artifactId>ffdec-lib</artifactId>
+  <version>19.1.2</version>
+  <packaging>jar</packaging>
+
+  <name>FFDec Library</name>
+  <description>FFDec (JPEXS Free Flash Decompiler) library jar redistributed for Maven-style consumption.</description>
+  <licenses>
+    <license>
+      <name>GNU Lesser General Public License, Version 3.0</name>
+      <url>https://www.gnu.org/licenses/lgpl-3.0.html</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <scm>
+    <url>https://github.com/jindrapetrik/jpexs-decompiler</url>
+  </scm>
+</project>
