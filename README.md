@@ -37,7 +37,7 @@ Add the dependency:
 
 ```groovy
 repositories {
-  maven { url "https://raw.githubusercontent.com/Quackster/ffdec-lib/master/lib" }
+  maven { url "https://github.com/Quackster/ffdec-lib/raw/master/lib" }
 }
 
 dependencies {
