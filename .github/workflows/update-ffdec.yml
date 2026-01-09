@@ -1,0 +1,149 @@
+name: Update FFDec Library
+
+on:
+  schedule:
+    # Check for new releases every day at midnight UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Get latest release from jpexs-decompiler
+        id: get_release
+        run: |
+          # Fetch the latest release information
+          RELEASE_DATA=$(curl -s https://api.github.com/repos/jindrapetrik/jpexs-decompiler/releases/latest)
+          
+          # Extract version number and download URL for ffdec_lib.jar
+          VERSION=$(echo "$RELEASE_DATA" | jq -r '.tag_name' | sed 's/version//')
+          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name == "ffdec_lib.jar") | .browser_download_url')
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+          echo "Latest version: $VERSION"
+          echo "Download URL: $DOWNLOAD_URL"
+          
+      - name: Check if version already exists
+        id: check_version
+        run: |
+          VERSION="${{ steps.get_release.outputs.version }}"
+          if [ -d "lib/com/jpexs/ffdec-lib/$VERSION" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $VERSION already exists in repository"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Version $VERSION is new"
+          fi
+          
+      - name: Create Maven directory structure
+        if: steps.check_version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_release.outputs.version }}"
+          mkdir -p "lib/com/jpexs/ffdec-lib/$VERSION"
+          
+      - name: Download ffdec_lib.jar
+        if: steps.check_version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_release.outputs.version }}"
+          DOWNLOAD_URL="${{ steps.get_release.outputs.download_url }}"
+          
+          # Download the JAR file
+          curl -L -o "lib/com/jpexs/ffdec-lib/$VERSION/ffdec-lib-$VERSION.jar" "$DOWNLOAD_URL"
+          
+      - name: Generate Maven metadata files
+        if: steps.check_version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_release.outputs.version }}"
+          BASE_DIR="lib/com/jpexs/ffdec-lib/$VERSION"
+          
+          # Generate POM file
+          cat > "$BASE_DIR/ffdec-lib-$VERSION.pom" << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" 
+                   xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>com.jpexs</groupId>
+            <artifactId>ffdec-lib</artifactId>
+            <version>$VERSION</version>
+            <description>JPEXS Free Flash Decompiler Library</description>
+            <url>https://github.com/jindrapetrik/jpexs-decompiler</url>
+          </project>
+          EOF
+          
+          # Generate checksums for JAR
+          sha1sum "$BASE_DIR/ffdec-lib-$VERSION.jar" | awk '{print $1}' > "$BASE_DIR/ffdec-lib-$VERSION.jar.sha1"
+          md5sum "$BASE_DIR/ffdec-lib-$VERSION.jar" | awk '{print $1}' > "$BASE_DIR/ffdec-lib-$VERSION.jar.md5"
+          
+          # Generate checksums for POM
+          sha1sum "$BASE_DIR/ffdec-lib-$VERSION.pom" | awk '{print $1}' > "$BASE_DIR/ffdec-lib-$VERSION.pom.sha1"
+          md5sum "$BASE_DIR/ffdec-lib-$VERSION.pom" | awk '{print $1}' > "$BASE_DIR/ffdec-lib-$VERSION.pom.md5"
+          
+      - name: Update maven-metadata.xml
+        if: steps.check_version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_release.outputs.version }}"
+          METADATA_DIR="lib/com/jpexs/ffdec-lib"
+          METADATA_FILE="$METADATA_DIR/maven-metadata.xml"
+          
+          # Get all versions
+          VERSIONS=$(ls -1 "$METADATA_DIR" | grep -E '^[0-9]+\.' | sort -V)
+          LATEST_VERSION=$(echo "$VERSIONS" | tail -n 1)
+          RELEASE_VERSION="$LATEST_VERSION"
+          LAST_UPDATED=$(date -u +%Y%m%d%H%M%S)
+          
+          # Generate maven-metadata.xml
+          cat > "$METADATA_FILE" << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <metadata>
+            <groupId>com.jpexs</groupId>
+            <artifactId>ffdec-lib</artifactId>
+            <versioning>
+              <latest>$LATEST_VERSION</latest>
+              <release>$RELEASE_VERSION</release>
+              <versions>
+          EOF
+          
+          # Add all versions
+          for v in $VERSIONS; do
+            echo "      <version>$v</version>" >> "$METADATA_FILE"
+          done
+          
+          cat >> "$METADATA_FILE" << EOF
+              </versions>
+              <lastUpdated>$LAST_UPDATED</lastUpdated>
+            </versioning>
+          </metadata>
+          EOF
+          
+          # Generate checksums for metadata
+          sha1sum "$METADATA_FILE" | awk '{print $1}' > "$METADATA_FILE.sha1"
+          md5sum "$METADATA_FILE" | awk '{print $1}' > "$METADATA_FILE.md5"
+          
+      - name: Commit and push changes
+        if: steps.check_version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_release.outputs.version }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add lib/
+          git commit -m "Add ffdec-lib version $VERSION"
+          git push
+          
+      - name: Create release tag
+        if: steps.check_version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_release.outputs.version }}"
+          
+          git tag -a "v$VERSION" -m "Release version $VERSION"
+          git push origin "v$VERSION"
