@@ -1,3 +1,25 @@
+name: Backfill ffdec-lib from upstream releases (run once)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq unzip
+
       - name: Backfill all stable upstream releases
         env:
           UPSTREAM: jindrapetrik/jpexs-decompiler
@@ -8,7 +30,9 @@
           root_dir="${GITHUB_WORKSPACE}/lib/com/jpexs/ffdec-lib"
           mkdir -p "$root_dir"
 
-          # --- Fetch ALL releases via pagination ---
+          # ----------------------------
+          # Fetch ALL releases (paged)
+          # ----------------------------
           all_releases="$(mktemp)"
           : > "$all_releases"
 
@@ -29,10 +53,11 @@
             page=$((page+1))
           done
 
-          # Combine into one array
           releases_json="$(jq -s 'add' "$all_releases")"
 
-          # Filter stable releases, oldest -> newest
+          # ----------------------------
+          # Filter stable releases
+          # ----------------------------
           stable="$(echo "$releases_json" | jq '
             map(select(.draft == false and .prerelease == false))
             | sort_by(.published_at)
@@ -40,7 +65,7 @@
 
           stable_count="$(echo "$stable" | jq 'length')"
           if [[ "$stable_count" -eq 0 ]]; then
-            echo "No stable releases found for ${UPSTREAM}."
+            echo "No stable releases found."
             exit 0
           fi
 
@@ -53,23 +78,24 @@
           work="$(mktemp -d)"
           trap 'rm -rf "$work" "$all_releases"' EXIT
 
-          # --- Iterate each stable release ---
-          # We choose the first asset that looks like ffdec lib zip.
-          # Adjust the regex if upstream uses a different name.
+          # ----------------------------
+          # Process each release
+          # ----------------------------
           echo "$stable" | jq -r '
             .[]
             | .tag_name as $tag
             | ($tag | sub("^v"; "")) as $version
             | (
                 .assets
-                | map(select(.browser_download_url | test("(?i)ffdec.*lib.*\\.zip$|ffdec-lib.*\\.zip$|ffdec.*\\.zip$")))
+                | map(select(.browser_download_url | test("(?i)ffdec.*\\.zip$")))
                 | .[0].browser_download_url
               ) as $asset_url
             | [$tag, $version, ($asset_url // "")]
             | @tsv
           ' | while IFS=$'\t' read -r tag version asset_url; do
-            if [[ -z "${tag}" || -z "${version}" || -z "${asset_url}" ]]; then
-              echo "Skipping row (missing asset?): tag='${tag}' version='${version}' asset='${asset_url}'" >&2
+
+            if [[ -z "$tag" || -z "$version" || -z "$asset_url" ]]; then
+              echo "Skipping release (no usable asset): tag=${tag}"
               failed=$((failed+1))
               continue
             fi
@@ -84,22 +110,22 @@
             echo "ADD  ${version} from ${tag}"
             mkdir -p "$target_dir"
 
-            zip_path="${work}/ffdec_lib_${version}.zip"
-            echo "  Downloading ${asset_url}"
+            zip_path="${work}/ffdec_${version}.zip"
+            echo "  Downloading asset"
             if ! curl -fL \
               -H "Accept: application/octet-stream" \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -o "$zip_path" \
               "$asset_url"; then
-              echo "  ERROR downloading ${asset_url}" >&2
+              echo "  ERROR downloading asset"
               rm -rf "$target_dir"
               failed=$((failed+1))
               continue
             fi
 
-            echo "  Extracting..."
+            echo "  Extracting"
             if ! unzip -q "$zip_path" -d "$target_dir"; then
-              echo "  ERROR extracting ${zip_path}" >&2
+              echo "  ERROR extracting zip"
               rm -rf "$target_dir"
               failed=$((failed+1))
               continue
@@ -109,7 +135,10 @@
             added=$((added+1))
           done
 
-          echo "Done. added=${added} skipped=${skipped} failed=${failed}"
+          # ----------------------------
+          # Commit once at the end
+          # ----------------------------
+          echo "Summary: added=${added}, skipped=${skipped}, failed=${failed}"
 
           if [[ "$added" -gt 0 ]]; then
             git status --porcelain
@@ -117,5 +146,5 @@
             git commit -m "Backfill ffdec-lib from upstream releases"
             git push
           else
-            echo "Nothing new to commit."
+            echo "No new versions added; nothing to commit."
           fi
