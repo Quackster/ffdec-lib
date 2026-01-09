@@ -1,4 +1,4 @@
-name: Backfill ffdec-lib from upstream releases (run once)
+name: Sync ffdec-lib from upstream releases
 
 on:
   workflow_dispatch:
@@ -14,137 +14,218 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install jq
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq unzip
-
-      - name: Backfill all stable upstream releases
+      - name: Fetch all upstream releases
+        id: fetch_releases
         env:
           UPSTREAM: jindrapetrik/jpexs-decompiler
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Fetch all releases
+          releases_json="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM}/releases?per_page=100")"
 
-          root_dir="${GITHUB_WORKSPACE}/lib/com/jpexs/ffdec-lib"
-          mkdir -p "$root_dir"
-
-          # ----------------------------
-          # Fetch ALL releases (paged)
-          # ----------------------------
-          all_releases="$(mktemp)"
-          : > "$all_releases"
-
-          page=1
-          while :; do
-            echo "Fetching releases page ${page}..."
-            page_json="$(curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${UPSTREAM}/releases?per_page=100&page=${page}")"
-
-            count="$(echo "$page_json" | jq 'length')"
-            if [[ "$count" -eq 0 ]]; then
-              break
+          # Save release info: tag|version|asset_url
+          rm -f releases_list.txt
+          echo "$releases_json" | jq -c '.[]' | while read -r release; do
+            draft=$(echo "$release" | jq -r '.draft')
+            prerelease=$(echo "$release" | jq -r '.prerelease')
+            if [[ "$draft" == "true" || "$prerelease" == "true" ]]; then
+              continue
             fi
-
-            echo "$page_json" >> "$all_releases"
-            page=$((page+1))
+            tag=$(echo "$release" | jq -r '.tag_name')
+            version="${tag#version}"
+            asset_url=$(echo "$release" | jq -r '
+              .assets
+              | map(select(.name | test("^ffdec_lib_") and (test("javadoc")|not) and test("\\.zip$")))
+              | .[0].browser_download_url // empty
+            ')
+            if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
+              continue
+            fi
+            echo "$tag|$version|$asset_url" >> releases_list.txt
           done
+          echo "Releases fetched and filtered."
 
-          releases_json="$(jq -s 'add' "$all_releases")"
-
-          # ----------------------------
-          # Filter stable releases
-          # ----------------------------
-          stable="$(echo "$releases_json" | jq '
-            map(select(.draft == false and .prerelease == false))
-            | sort_by(.published_at)
-          ')"
-
-          stable_count="$(echo "$stable" | jq 'length')"
-          if [[ "$stable_count" -eq 0 ]]; then
-            echo "No stable releases found."
+      - name: Check existing releases
+        id: check_existing
+        run: |
+          set -euo pipefail
+          if [[ ! -f releases_list.txt ]]; then
+            echo "No releases to process."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Found ${stable_count} stable releases."
-
-          added=0
-          skipped=0
-          failed=0
-
-          work="$(mktemp -d)"
-          trap 'rm -rf "$work" "$all_releases"' EXIT
-
-          # ----------------------------
-          # Process each release
-          # ----------------------------
-          echo "$stable" | jq -r '
-            .[]
-            | .tag_name as $tag
-            | ($tag | sub("^v"; "")) as $version
-            | (
-                .assets
-                | map(select(.browser_download_url | test("(?i)ffdec.*\\.zip$")))
-                | .[0].browser_download_url
-              ) as $asset_url
-            | [$tag, $version, ($asset_url // "")]
-            | @tsv
-          ' | while IFS=$'\t' read -r tag version asset_url; do
-
-            if [[ -z "$tag" || -z "$version" || -z "$asset_url" ]]; then
-              echo "Skipping release (no usable asset): tag=${tag}"
-              failed=$((failed+1))
-              continue
-            fi
-
-            target_dir="${root_dir}/${version}"
+          to_process=()
+          while IFS='|' read -r tag version asset_url; do
+            target_dir="lib/com/jpexs/ffdec-lib/$version"
             if [[ -d "$target_dir" ]]; then
-              echo "SKIP ${version} (already exists)"
-              skipped=$((skipped+1))
-              continue
+              echo "Release $version already exists, skipping."
+            else
+              to_process+=("$tag|$version|$asset_url")
             fi
+          done < releases_list.txt
 
-            echo "ADD  ${version} from ${tag}"
-            mkdir -p "$target_dir"
-
-            zip_path="${work}/ffdec_${version}.zip"
-            echo "  Downloading asset"
-            if ! curl -fL \
-              -H "Accept: application/octet-stream" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -o "$zip_path" \
-              "$asset_url"; then
-              echo "  ERROR downloading asset"
-              rm -rf "$target_dir"
-              failed=$((failed+1))
-              continue
-            fi
-
-            echo "  Extracting"
-            if ! unzip -q "$zip_path" -d "$target_dir"; then
-              echo "  ERROR extracting zip"
-              rm -rf "$target_dir"
-              failed=$((failed+1))
-              continue
-            fi
-
-            rm -f "$zip_path"
-            added=$((added+1))
-          done
-
-          # ----------------------------
-          # Commit once at the end
-          # ----------------------------
-          echo "Summary: added=${added}, skipped=${skipped}, failed=${failed}"
-
-          if [[ "$added" -gt 0 ]]; then
-            git status --porcelain
-            git add "$root_dir"
-            git commit -m "Backfill ffdec-lib from upstream releases"
-            git push
+          if [[ ${#to_process[@]} -eq 0 ]]; then
+            echo "No new releases to process."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           else
-            echo "No new versions added; nothing to commit."
+            printf "%s\n" "${to_process[@]}" > new_releases_to_process.txt
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Download and process new releases
+        if: steps.check_existing.outputs.exists == 'true'
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          while IFS='|' read -r tag version asset_url; do
+            target_dir="lib/com/jpexs/ffdec-lib/$version"
+            mkdir -p "$target_dir"
+            cd "$target_dir"
+
+            echo "Downloading: $asset_url"
+            curl -fL -o ffdec_lib.zip "$asset_url"
+
+            mkdir extracted
+            unzip -q ffdec_lib.zip -d extracted
+
+            # Find the jar file
+            jar_path=$(find extracted -type f -iname "ffdec_lib*.jar" | head -n 1 || true)
+            if [[ -z "$jar_path" ]]; then
+              jar_path=$(find extracted -type f -iname "*.jar" -printf "%s\t%p\n" | sort -nr | head -n 1 | cut -f2- || true)
+            fi
+
+            if [[ -z "$jar_path" || ! -f "$jar_path" ]]; then
+              echo "Could not find a jar inside ffdec_lib.zip" >&2
+              exit 1
+            fi
+
+            echo "Using jar: $jar_path"
+
+            # Copy jar to the directory
+            cp "$jar_path" "ffdec-lib-${version}.jar"
+
+            # Generate minimal POM
+            cat > "ffdec-lib-${version}.pom" <<EOF
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.jpexs</groupId>
+  <artifactId>ffdec-lib</artifactId>
+  <version>${version}</version>
+  <packaging>jar</packaging>
+  <name>FFDec Library</name>
+  <description>FFDec (JPEXS Free Flash Decompiler) library jar redistributed for Maven-style consumption.</description>
+  <licenses>
+    <license>
+      <name>GNU Lesser General Public License, Version 3.0</name>
+      <url>https://www.gnu.org/licenses/lgpl-3.0.html</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <scm>
+    <url>https://github.com/jindrapetrik/jpexs-decompiler</url>
+  </scm>
+</project>
+EOF
+
+            # Checksums
+            md5sum "ffdec-lib-${version}.jar" > "ffdec-lib-${version}.jar.md5"
+            sha1sum "ffdec-lib-${version}.jar" > "ffdec-lib-${version}.jar.sha1"
+            md5sum "ffdec-lib-${version}.pom" > "ffdec-lib-${version}.pom.md5"
+            sha1sum "ffdec-lib-${version}.pom" > "ffdec-lib-${version}.pom.sha1"
+
+            # Update maven-metadata.xml
+            python3 - <<EOF
+import os
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+
+version = "${version}"
+root_dir = os.path.join("${GITHUB_WORKSPACE}", "lib", "com", "jpexs", "ffdec-lib")
+os.makedirs(root_dir, exist_ok=True)
+meta_path = os.path.join(root_dir, "maven-metadata.xml")
+
+def indent(elem, level=0):
+    i = "\\n" + level*"  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        for e in elem:
+            indent(e, level+1)
+        if not e.tail or not e.tail.strip():
+            e.tail = i
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = i
+
+if os.path.exists(meta_path):
+    tree = ET.parse(meta_path)
+    md = tree.getroot()
+else:
+    md = ET.Element("metadata")
+    ET.SubElement(md, "groupId").text = "com.jpexs"
+    ET.SubElement(md, "artifactId").text = "ffdec-lib"
+    ET.SubElement(md, "versioning")
+    tree = ET.ElementTree(md)
+
+versioning = md.find("versioning")
+if versioning is None:
+    versioning = ET.SubElement(md, "versioning")
+
+versions = versioning.find("versions")
+if versions is None:
+    versions = ET.SubElement(versioning, "versions")
+
+existing_versions = [v.text for v in versions.findall("version") if v.text]
+if version not in existing_versions:
+    ET.SubElement(versions, "version").text = version
+
+# Sort versions
+def version_key(v):
+    try:
+        return tuple(int(x) for x in v.split('.'))
+    except:
+        return (10**9, v)
+
+all_versions = sorted(set(existing_versions + [version]), key=version_key)
+# Clear old version list
+for v in list(versions):
+    versions.remove(v)
+# Add sorted versions
+for v in all_versions:
+    ET.SubElement(versions, "version").text = v
+
+latest = versioning.find("latest")
+if latest is None:
+    latest = ET.SubElement(versioning, "latest")
+release = versioning.find("release")
+if release is None:
+    release = ET.SubElement(versioning, "release")
+
+latest.text = all_versions[-1] if all_versions else version
+release.text = all_versions[-1] if all_versions else version
+
+last_updated = versioning.find("lastUpdated")
+if last_updated is None:
+    last_updated = ET.SubElement(versioning, "lastUpdated")
+last_updated.text = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+indent(md)
+tree.write(meta_path, encoding="utf-8", xml_declaration=True)
+EOF
+
+          done < new_releases_to_process.txt
+
+      - name: Commit and push new releases
+        if: steps.check_existing.outputs.exists == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add lib/
+          git commit -m "Add ffdec-lib releases from upstream"
+          git push
