@@ -1,4 +1,4 @@
-name: Sync ffdec-lib from upstream releases
+name: Retroactively sync ffdec-lib from upstream releases
 
 on:
   workflow_dispatch:
